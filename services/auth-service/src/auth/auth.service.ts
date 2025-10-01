@@ -1,18 +1,26 @@
+import { HttpService } from '@nestjs/axios';
 import {
   BadRequestException,
   Injectable,
+  InternalServerErrorException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { User } from '@prisma/client';
 import bcrypt from 'node_modules/bcryptjs';
+import { firstValueFrom } from 'rxjs';
 import { PrismaService } from 'src/prisma/prisma.service';
 
 @Injectable()
 export class AuthService {
+  private billingUrl = process.env.BILLING_URL || 'http://localhost:3002';
+
   constructor(
     private prisma: PrismaService,
     private jwt: JwtService,
+    private http: HttpService,
+    private config: ConfigService,
   ) {}
 
   async register(email: string, password: string) {
@@ -22,7 +30,22 @@ export class AuthService {
     const user = await this.prisma.user.create({
       data: { email, password: hash },
     });
-    return { id: user.id, email: user.email };
+
+    try {
+      await firstValueFrom(
+        this.http.post(`${this.billingUrl}/wallet/init`, { userId: user.id }),
+      );
+      const tokens = await this.buildTokens(user);
+      return { user: { id: user.id, email: user.email }, tokens };
+    } catch (error) {
+      // rollback user if billing init failed
+      await this.prisma.user
+        .delete({ where: { id: user.id } })
+        .catch(() => null);
+      throw new InternalServerErrorException(
+        'Failed to initialize wallet; registration rolled back',
+      );
+    }
   }
 
   async validateUser(email: string, plain: string) {
@@ -31,6 +54,25 @@ export class AuthService {
     const ok = await bcrypt.compare(plain, user.password);
     if (!ok) return null;
     return user;
+  }
+
+  private async buildTokens(user: User) {
+    const access = this.jwt.sign({ sub: user.id, email: user.email });
+    const refresh = this.jwt.sign(
+      { sub: user.id },
+      {
+        secret: process.env.REFRESH_TOKEN_SECRET || process.env.JWT_SECRET,
+        expiresIn: `${process.env.REFRESH_TOKEN_EXPIRES_IN || 604800}s`,
+      },
+    );
+    const expiresAt = new Date(
+      Date.now() +
+        parseInt(process.env.REFRESH_TOKEN_EXPIRES_IN || '604800', 10) * 1000,
+    );
+    await this.prisma.refreshToken.create({
+      data: { token: refresh, userId: user.id, expiresAt },
+    });
+    return { accessToken: access, refreshToken: refresh };
   }
 
   async login(user: User) {
