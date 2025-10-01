@@ -19,10 +19,10 @@ model User {
   email String @unique
   password String 
   createdAt DateTime @default(now())
-  refreshTokens RefreshTokens[]
+  refreshTokens RefreshToken[]
 }
 
-model RefreshTokens {
+model RefreshToken {
   id    String @id @default(uuid())
   token String @unique
   userId String
